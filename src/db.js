@@ -8,11 +8,11 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
-  completed_today INTEGER NOT NULL DEFAULT 0,
   streak INTEGER NOT NULL DEFAULT 0,
   best_streak INTEGER NOT NULL DEFAULT 0,
   last_active_day TEXT,
   total_completed INTEGER NOT NULL DEFAULT 0,
+  total_points INTEGER NOT NULL DEFAULT 0,
   boxes_opened INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (guild_id, user_id)
@@ -27,8 +27,16 @@ CREATE TABLE IF NOT EXISTS daily_quests (
   description TEXT NOT NULL,
   target INTEGER NOT NULL,
   reward_points INTEGER NOT NULL,
-  progress INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (guild_id, quest_date, quest_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_quest_progress (
+  guild_id TEXT NOT NULL,
+  quest_date TEXT NOT NULL,
+  quest_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  progress INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (guild_id, quest_date, quest_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS completions (
@@ -64,7 +72,7 @@ CREATE TABLE IF NOT EXISTS settings (
 `);
 
 function ensureUser(guildId, userId) {
-  db.prepare(`INSERT OR IGNORE INTO users (guild_id, user_id, created_at) VALUES (?, ?, ?)`).run(guildId, userId, Date.now());
+  db.prepare('INSERT OR IGNORE INTO users (guild_id, user_id, created_at) VALUES (?, ?, ?)').run(guildId, userId, Date.now());
 }
 
 module.exports = { db, ensureUser };
