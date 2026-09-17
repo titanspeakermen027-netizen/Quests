@@ -471,7 +471,7 @@ function grantPoints(guildId, userId, points, source = 'bonus', options = {}) {
 
   ensureUser(guildId, userId);
   const before = profile(guildId, userId);
-  const oldLevel = levelFromPoints(guildId, before.total_points);
+  const oldLevel = before.level;
 
   db.prepare(
     'UPDATE users SET total_points = total_points + ? WHERE guild_id = ? AND user_id = ?'
@@ -480,18 +480,8 @@ function grantPoints(guildId, userId, points, source = 'bonus', options = {}) {
   const after = profile(guildId, userId);
   const newLevel = levelFromPoints(guildId, after.total_points);
 
-  logPoints(
-    guildId,
-    userId,
-    points,
-    source,
-    options.periodType || null,
-    options.periodKey || null
-  );
-
-  if (options.logCurrentPeriods !== false) {
-    logCurrentPeriods(guildId, userId, points, source);
-  }
+  logPoints(guildId, userId, points, source, options.periodType || null, options.periodKey || null);
+  if (options.logCurrentPeriods !== false) logCurrentPeriods(guildId, userId, points, source);
 
   return {
     points,
@@ -504,13 +494,14 @@ function grantPoints(guildId, userId, points, source = 'bonus', options = {}) {
 
 function awardCompletion(guildId, userId, completedQuests) {
   if (!completedQuests.length) {
+    const current = profile(guildId, userId);
     return {
       points: 0,
       achievements: [],
       boxAwarded: false,
-      streak: profile(guildId, userId).streak,
-      oldLevel: profile(guildId, userId).level,
-      newLevel: profile(guildId, userId).level,
+      streak: current.streak,
+      oldLevel: current.level,
+      newLevel: current.level,
       levelRewards: []
     };
   }
@@ -527,14 +518,9 @@ function awardCompletion(guildId, userId, completedQuests) {
     ).run(completedQuests.length, totalPoints, guildId, userId);
 
     for (const quest of completedQuests) {
-      logPoints(
-        guildId,
-        userId,
-        quest.reward_points,
-        `${quest.scope}:${quest.quest_id}`,
-        quest.scope,
-        quest.periodKey
-      );
+      const source = `${quest.scope}:${quest.quest_id}`;
+      logPoints(guildId, userId, quest.reward_points, source, quest.scope, quest.periodKey);
+      logCurrentPeriods(guildId, userId, quest.reward_points, source);
     }
   })();
 
@@ -564,15 +550,14 @@ function awardCompletion(guildId, userId, completedQuests) {
   }
 
   const after = profile(guildId, userId);
-  const newLevel = after.level;
   return {
     points: totalPoints,
     achievements: evaluateAchievements(guildId, userId),
     boxAwarded,
     streak,
     oldLevel,
-    newLevel,
-    levelRewards: availableLevelRewards(guildId, oldLevel, newLevel)
+    newLevel: after.level,
+    levelRewards: availableLevelRewards(guildId, oldLevel, after.level)
   };
 }
 
@@ -599,9 +584,7 @@ function weeklyStatus(guildId, userId) {
 function seasonalStatus(guildId, userId) {
   ensureUser(guildId, userId);
   const info = seasonInfo(guildId);
-  if (!isSeasonActive(info)) {
-    return { active: false, info, quests: [], done: new Set(), points: 0 };
-  }
+  if (!isSeasonActive(info)) return { active: false, info, quests: [], done: new Set(), points: 0 };
 
   const quests = generateSeasonalQuests(guildId, info).map(quest => ({
     ...quest,
@@ -638,13 +621,12 @@ function profile(guildId, userId) {
 
 function leaderboard(guildId, scope = 'all', limit = 10) {
   if (scope === 'weekly') {
-    const key = weekKey();
     return db.prepare(
       `SELECT user_id, SUM(points) AS points
        FROM point_ledger
        WHERE guild_id = ? AND period_type = 'weekly' AND period_key = ?
        GROUP BY user_id ORDER BY points DESC LIMIT ?`
-    ).all(guildId, key, limit);
+    ).all(guildId, weekKey(), limit);
   }
 
   if (scope === 'seasonal') {
@@ -816,7 +798,7 @@ function helpData() {
       ['/quest-event', 'إنشاء وإدارة فعالية تفاعلية بالأزرار.']
     ],
     admin: [
-      ['/quest-settings', 'إدارة عدد المهام والمستويات والموسم وقنوات السجلات والمكافآت.']
+      ['/quest-settings', 'إدارة عدد المهام والمستويات والموسم والقنوات والمكافآت.']
     ]
   };
 }
