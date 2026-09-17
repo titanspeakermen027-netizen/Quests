@@ -3,147 +3,401 @@ require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   SlashCommandBuilder,
   PermissionFlagsBits,
   EmbedBuilder
 } = require('discord.js');
 const { db, ensureUser } = require('./db');
-const { dailyStatus, leaderboard, progress, completeEventQuest, awardCompletion, listAchievements, evaluateAchievements } = require('./quests');
+const {
+  dailyStatus,
+  leaderboard,
+  profile,
+  progress,
+  completeEventQuest,
+  awardCompletion,
+  listAchievements,
+  consumeMysteryBox,
+  recordMessageEligibility,
+  evaluateAchievements
+} = require('./quests');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildVoiceStates]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildVoiceStates
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
+const QUEST_INFO_COMMANDS = new Set(['quests', 'quests-top', 'quest-profile', 'quest-streak', 'achievements', 'mystery-box']);
+
 const commands = [
-  new SlashCommandBuilder().setName('quests').setDescription('عرض مهامك اليومية وتقدمك.'),
-  new SlashCommandBuilder().setName('quests-top').setDescription('عرض ترتيب أكثر الأعضاء إنجازاً للمهام.'),
-  new SlashCommandBuilder().setName('quest-streak').setDescription('عرض سلسلة إنجاز المهام الخاصة بك.'),
-  new SlashCommandBuilder().setName('achievements').setDescription('عرض إنجازاتك التي فتحتها.'),
-  new SlashCommandBuilder().setName('mystery-box').setDescription('فتح الصندوق الغامض والحصول على مكافأة عشوائية.'),
-  new SlashCommandBuilder().setName('event-complete').setDescription('تسجيل مشاركة عضو في فعالية.')
-    .addUserOption(o => o.setName('user').setDescription('العضو الذي شارك في الفعالية.').setRequired(true))
+  new SlashCommandBuilder()
+    .setName('quests')
+    .setDescription('عرض مهامك اليومية وتقدمك.'),
+  new SlashCommandBuilder()
+    .setName('quests-top')
+    .setDescription('عرض ترتيب أكثر الأعضاء إنجازاً للمهام.'),
+  new SlashCommandBuilder()
+    .setName('quest-profile')
+    .setDescription('عرض إحصائياتك في نظام المهام.'),
+  new SlashCommandBuilder()
+    .setName('quest-streak')
+    .setDescription('عرض سلسلة إنجاز المهام الخاصة بك.'),
+  new SlashCommandBuilder()
+    .setName('achievements')
+    .setDescription('عرض إنجازاتك المفتوحة والمقفلة.'),
+  new SlashCommandBuilder()
+    .setName('mystery-box')
+    .setDescription('فتح Mystery Box من الصناديق التي حصلت عليها.'),
+  new SlashCommandBuilder()
+    .setName('quest-event')
+    .setDescription('تسجيل مشاركة عضو في فعالية.')
+    .addUserOption(option => option.setName('user').setDescription('العضو المشارك في الفعالية.').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
 ];
 
-function rewardRoles() {
-  return (process.env.MYSTERY_BOX_ROLE_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
+function numberEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(value) ? value : fallback;
 }
 
-function progressBar(current, target) {
-  const size = 10;
-  const filled = Math.round(Math.min(current / target, 1) * size);
-  return `${'█'.repeat(filled)}${'░'.repeat(size - filled)} ${Math.min(current, target)}/${target}`;
+function rewardRoleIds() {
+  return (process.env.MYSTERY_BOX_ROLE_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
 }
 
-async function notifyAchievements(user, achievements) {
+function rewardWeights(length) {
+  const raw = (process.env.MYSTERY_BOX_ROLE_WEIGHTS || '').split(',').map(value => Number.parseFloat(value.trim()));
+  if (raw.length !== length || raw.some(weight => !Number.isFinite(weight) || weight <= 0)) return Array(length).fill(1);
+  return raw;
+}
+
+function weightedRandom(items, weights) {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let cursor = Math.random() * total;
+  for (let index = 0; index < items.length; index += 1) {
+    cursor -= weights[index];
+    if (cursor < 0) return items[index];
+  }
+  return items[items.length - 1];
+}
+
+function progressBar(progress, target, size = 10) {
+  const ratio = target > 0 ? Math.min(progress / target, 1) : 0;
+  const filled = Math.round(ratio * size);
+  return `${'█'.repeat(filled)}${'░'.repeat(size - filled)} ${Math.min(progress, target)}/${target}`;
+}
+
+function humanTime(ms) {
+  const totalMinutes = Math.max(1, Math.ceil(ms / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours ? `${hours} ساعة و${minutes} دقيقة` : `${minutes} دقيقة`;
+}
+
+async function sendLog(guild, content) {
+  const channelId = process.env.LOG_CHANNEL_ID;
+  if (!channelId) return;
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel?.isTextBased()) return;
+  await channel.send({ content }).catch(() => {});
+}
+
+async function sendAchievementNotice(user, guild, achievements) {
   if (!achievements.length) return;
-  const text = achievements.map(a => `🏅 **${a.name}** — ${a.description}`).join('\n');
-  await user.send(`🎉 **إنجاز جديد!**\n\n${text}`).catch(() => {});
+  const lines = achievements.map(achievement => `${achievement.icon} **${achievement.name}** — ${achievement.description}`).join('\n');
+  await user.send({ content: `🏅 **إنجاز جديد!**\n\n${lines}` }).catch(() => {});
+  await sendLog(guild, `🏅 <@${user.id}> فتح ${achievements.length} إنجاز جديد: ${achievements.map(item => item.name).join('، ')}.`);
 }
 
-async function registerProgress(guildId, userId, type, amount = 1, userForDm = null) {
-  const completed = progress(guildId, userId, type, amount);
-  if (!completed.length) return;
-  const result = awardCompletion(guildId, userId, completed);
-  if (result.achievements.length && userForDm) await notifyAchievements(userForDm, result.achievements);
+async function processCompletion({ guild, user, completed, replyChannel, publicNotice = false }) {
+  if (!completed.length) return null;
+  const result = awardCompletion(guild.id, user.id, completed);
+  const questNames = completed.map(quest => `**${quest.title}**`).join('، ');
+
+  const summary = [
+    `🎉 **تم إكمال مهمة!**`,
+    `✅ ${questNames}`,
+    `⭐ حصلت على **${result.points} نقطة**.`,
+    `🔥 سلسلة المهام: **${result.streak} يوم**.`
+  ];
+  if (result.boxAwarded) summary.push('🎁 أكملت جميع مهام اليوم وحصلت على **Mystery Box** جديد! استخدم `/mystery-box` لفتحه.');
+
+  if (publicNotice && replyChannel?.isTextBased()) {
+    await replyChannel.send({
+      content: summary.join('\n'),
+      allowedMentions: { users: [user.id], repliedUser: false }
+    }).catch(() => {});
+  } else {
+    await user.send({ content: summary.join('\n') }).catch(() => {});
+  }
+
+  if (result.boxAwarded) {
+    await sendLog(guild, `🎁 <@${user.id}> حصل على Mystery Box بعد إكمال جميع مهام اليوم.`);
+  }
+  await sendAchievementNotice(user, guild, result.achievements);
+  return result;
+}
+
+function startVoiceSession(guildId, userId) {
+  const now = Date.now();
+  db.prepare(`INSERT INTO voice_sessions (guild_id, user_id, started_at, last_flushed_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(guild_id,user_id) DO NOTHING`).run(guildId, userId, now, now);
+}
+
+async function flushVoiceSession(guild, userId, remove = false) {
+  const row = db.prepare('SELECT started_at, last_flushed_at FROM voice_sessions WHERE guild_id = ? AND user_id = ?')
+    .get(guild.id, userId);
+  if (!row) return;
+  const now = Date.now();
+  const minutes = Math.floor((now - row.last_flushed_at) / 60000);
+  if (minutes > 0) {
+    const completed = progress(guild.id, userId, 'voice_minutes', minutes);
+    db.prepare('UPDATE voice_sessions SET last_flushed_at = ? WHERE guild_id = ? AND user_id = ?').run(now - ((now - row.last_flushed_at) % 60000), guild.id, userId);
+    if (completed.length) {
+      const member = guild.members.cache.get(userId);
+      if (member) await processCompletion({ guild, user: member.user, completed, publicNotice: false });
+    }
+  }
+  if (remove) db.prepare('DELETE FROM voice_sessions WHERE guild_id = ? AND user_id = ?').run(guild.id, userId);
+}
+
+async function flushAllVoiceSessions() {
+  for (const [guildId, userId] of db.prepare('SELECT guild_id, user_id FROM voice_sessions').all().map(row => [row.guild_id, row.user_id])) {
+    const guild = client.guilds.cache.get(guildId);
+    if (guild) await flushVoiceSession(guild, userId, false);
+  }
+}
+
+function chooseMysteryRole(guild, member) {
+  const configuredIds = rewardRoleIds();
+  const configured = configuredIds
+    .map(id => guild.roles.cache.get(id))
+    .filter(role => role && role.editable && !member.roles.cache.has(role.id));
+  if (!configured.length) return null;
+  return weightedRandom(configured, rewardWeights(configured.length));
+}
+
+function boxTicketText(guild, role) {
+  const channelId = process.env.TICKET_CHANNEL_ID;
+  const channel = channelId ? guild.channels.cache.get(channelId) : null;
+  const ticketHint = channel ? ` داخل ${channel}` : ' داخل السيرفر';
+  return `📩 لاستلام المكافأة وإتمام الإجراءات، يرجى فتح تذكرة${ticketHint}.\n🎁 المكافأة: **${role.name}**`;
 }
 
 client.once('ready', async () => {
-  await client.application.commands.set(commands.map(c => c.toJSON()), process.env.GUILD_ID || undefined);
-  console.log(`✅ تم تسجيل الدخول باسم ${client.user.tag}`);
+  await client.application.commands.set(commands.map(command => command.toJSON()), process.env.GUILD_ID || undefined);
+  db.prepare('DELETE FROM voice_sessions').run();
+  for (const guild of client.guilds.cache.values()) {
+    for (const state of guild.voiceStates.cache.values()) {
+      if (state.channelId && !state.member?.user.bot) startVoiceSession(guild.id, state.id);
+    }
+  }
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`📌 Registered ${commands.length} slash commands.`);
 });
 
 client.on('messageCreate', async message => {
   if (!message.guild || message.author.bot) return;
-  await registerProgress(message.guild.id, message.author.id, 'messages', 1, message.author);
+  if (!recordMessageEligibility(message.guild.id, message.author.id, message.content)) return;
+
+  const completed = [
+    ...progress(message.guild.id, message.author.id, 'messages', 1),
+    ...progress(message.guild.id, message.author.id, 'unique_channels', 1, { channelId: message.channelId })
+  ];
+  if (completed.length) await processCompletion({ guild: message.guild, user: message.author, completed, replyChannel: message.channel, publicNotice: true });
 });
 
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot || !reaction.message.guild) return;
-  await registerProgress(reaction.message.guild.id, user.id, 'reactions', 1, user);
+  if (reaction.message.partial) {
+    await reaction.message.fetch().catch(() => {});
+  }
+  const guild = reaction.message.guild;
+  const completed = progress(guild.id, user.id, 'reactions', 1);
+  if (completed.length) await processCompletion({ guild, user, completed, publicNotice: false });
 });
 
-client.on('voiceStateUpdate', (oldState, newState) => {
+client.on('voiceStateUpdate', async (oldState, newState) => {
   const member = newState.member || oldState.member;
   if (!member || member.user.bot) return;
-  if (!oldState.channelId && newState.channelId) member.__questsVoiceStarted = Date.now();
-  if (oldState.channelId && !newState.channelId && member.__questsVoiceStarted) {
-    const minutes = Math.floor((Date.now() - member.__questsVoiceStarted) / 60000);
-    if (minutes > 0) registerProgress(oldState.guild.id, member.id, 'voice_minutes', minutes, member.user);
-    delete member.__questsVoiceStarted;
+  const guild = newState.guild;
+  if (!oldState.channelId && newState.channelId) {
+    startVoiceSession(guild.id, member.id);
+    return;
+  }
+  if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+    await flushVoiceSession(guild, member.id, false);
+    startVoiceSession(guild.id, member.id);
+    return;
+  }
+  if (oldState.channelId && !newState.channelId) {
+    await flushVoiceSession(guild, member.id, true);
   }
 });
 
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand() || !interaction.guild) return;
+  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.guild) {
+    await interaction.reply({ content: 'هذا الأمر متاح داخل السيرفرات فقط.', ephemeral: true });
+    return;
+  }
+
   ensureUser(interaction.guildId, interaction.user.id);
 
-  // Every command interaction contributes to command-based daily quests.
-  await registerProgress(interaction.guildId, interaction.user.id, 'commands', 1, interaction.user);
+  if (!QUEST_INFO_COMMANDS.has(interaction.commandName)) {
+    const completed = progress(interaction.guildId, interaction.user.id, 'commands', 1);
+    if (completed.length) await processCompletion({ guild: interaction.guild, user: interaction.user, completed, publicNotice: false });
+  }
 
-  try {
-    if (interaction.commandName === 'quests') {
-      const s = dailyStatus(interaction.guildId, interaction.user.id);
-      const lines = s.quests.map(q => `${s.done.has(q.quest_id) ? '✅' : '▫️'} **${q.title}**\n${q.description}\n${progressBar(q.progress, q.target)} · ⭐ ${q.reward_points}`);
-      return interaction.reply({ embeds: [new EmbedBuilder().setTitle('📋 مهامك اليومية').setDescription(lines.join('\n\n')).setColor(0x5865F2).setFooter({ text: `اليوم: ${s.date} • المكتمل: ${s.done.size}/${s.quests.length}` })] });
+  if (interaction.commandName === 'quests') {
+    const status = dailyStatus(interaction.guildId, interaction.user.id);
+    const lines = status.quests.map(quest => {
+      const done = status.done.has(quest.quest_id);
+      return `${done ? '✅' : '▫️'} **${quest.title}** — ${quest.description}\n${progressBar(quest.progress, quest.target)} · ⭐ **${quest.reward_points}**`;
+    });
+    await interaction.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle('📋 المهام اليومية')
+        .setDescription(lines.join('\n\n'))
+        .setColor(0x5865F2)
+        .setFooter({ text: `التاريخ: ${status.date} • المكتمل: ${status.done.size}/${status.quests.length}` })
+    ] });
+    return;
+  }
+
+  if (interaction.commandName === 'quests-top') {
+    const rows = leaderboard(interaction.guildId, 10);
+    const lines = rows.length
+      ? rows.map((row, index) => `**${index + 1}.** <@${row.user_id}> — ⭐ **${row.total_points}** نقطة · ✅ ${row.total_completed} مهمة · 🔥 ${row.streak} يوم`).join('\n')
+      : 'لا توجد بيانات بعد.';
+    await interaction.reply({ embeds: [
+      new EmbedBuilder().setTitle('🏆 ترتيب المهام').setDescription(lines).setColor(0xF1C40F)
+    ] });
+    return;
+  }
+
+  if (interaction.commandName === 'quest-profile') {
+    const data = profile(interaction.guildId, interaction.user.id);
+    const achievements = listAchievements(interaction.guildId, interaction.user.id);
+    const unlocked = achievements.filter(item => item.unlocked).length;
+    await interaction.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle(`📊 إحصائيات ${interaction.user.username}`)
+        .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
+        .setDescription([
+          `⭐ **النقاط:** ${data.total_points}`,
+          `✅ **المهام المكتملة:** ${data.total_completed}`,
+          `🔥 **السلسلة الحالية:** ${data.streak} يوم`,
+          `🏅 **أفضل سلسلة:** ${data.best_streak} يوم`,
+          `🎁 **الصناديق المتاحة:** ${data.boxes_balance}`,
+          `📦 **الصناديق المفتوحة:** ${data.boxes_opened}`,
+          `🏅 **الإنجازات:** ${unlocked}/${achievements.length}`
+        ].join('\n'))
+        .setColor(0x5865F2)
+    ] });
+    return;
+  }
+
+  if (interaction.commandName === 'quest-streak') {
+    const data = profile(interaction.guildId, interaction.user.id);
+    await interaction.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle('🏆 Quest Streak')
+        .setDescription(`🔥 السلسلة الحالية: **${data.streak} يوم**\n🏅 أعلى سلسلة: **${data.best_streak} يوم**\n✅ إجمالي المهام المكتملة: **${data.total_completed}**`)
+        .setColor(0x57F287)
+    ] });
+    return;
+  }
+
+  if (interaction.commandName === 'achievements') {
+    const achievements = listAchievements(interaction.guildId, interaction.user.id);
+    const lines = achievements.map(achievement => `${achievement.unlocked ? '✅' : '🔒'} ${achievement.icon} **${achievement.name}** — ${achievement.description}`);
+    const count = achievements.filter(item => item.unlocked).length;
+    await interaction.reply({ embeds: [
+      new EmbedBuilder()
+        .setTitle('🏅 Achievements')
+        .setDescription(lines.join('\n'))
+        .setFooter({ text: `الإنجازات المفتوحة: ${count}/${achievements.length}` })
+        .setColor(0xEB459E)
+    ] });
+    return;
+  }
+
+  if (interaction.commandName === 'quest-event') {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({ content: 'لا تملك الصلاحية لاستخدام هذا الأمر.', ephemeral: true });
+      return;
+    }
+    const target = interaction.options.getUser('user', true);
+    const completed = completeEventQuest(interaction.guildId, target.id);
+    const result = completed.length ? await processCompletion({ guild: interaction.guild, user: target, completed, publicNotice: false }) : null;
+    await interaction.reply({
+      content: result
+        ? `✅ تم تسجيل مشاركة <@${target.id}> في الفعالية وحصل على **${result.points} نقطة**.`
+        : `✅ تم تسجيل التقدم لـ <@${target.id}>.`
+    });
+    return;
+  }
+
+  if (interaction.commandName === 'mystery-box') {
+    const data = profile(interaction.guildId, interaction.user.id);
+    if (data.boxes_balance <= 0) {
+      await interaction.reply({ content: '🎁 لا تملك أي Mystery Box حالياً. أكمل جميع مهام اليوم للحصول على صندوق جديد.', ephemeral: true });
+      return;
     }
 
-    if (interaction.commandName === 'quests-top') {
-      const rows = leaderboard(interaction.guildId, 10);
-      const lines = rows.length ? rows.map((r, i) => `**${i + 1}.** <@${r.user_id}> — 🏆 ${r.total_completed} مهمة · ⭐ ${r.total_points} نقطة · 🔥 ${r.streak} يوم`).join('\n') : 'لا توجد بيانات حتى الآن.';
-      return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏆 Quest Leaderboard').setDescription(lines).setColor(0xF1C40F)] });
+    const role = chooseMysteryRole(interaction.guild, interaction.member);
+    if (!role) {
+      await interaction.reply({ content: '⚠️ لا توجد رتبة صالحة حالياً يمكن منحها من قائمة Mystery Box. تأكد من إعداد الرتب ومن صلاحيات البوت.', ephemeral: true });
+      return;
     }
 
-    if (interaction.commandName === 'quest-streak') {
-      const u = db.prepare('SELECT streak, best_streak, total_completed, total_points FROM users WHERE guild_id = ? AND user_id = ?').get(interaction.guildId, interaction.user.id);
-      return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏆 Quest Streak').setDescription(`🔥 السلسلة الحالية: **${u.streak} يوم**\n🏅 أعلى سلسلة: **${u.best_streak} يوم**\n✅ إجمالي المهام: **${u.total_completed}**\n⭐ إجمالي النقاط: **${u.total_points}**`).setColor(0x57F287)] });
+    const consumed = consumeMysteryBox(interaction.guildId, interaction.user.id);
+    if (!consumed) {
+      await interaction.reply({ content: 'تعذر حجز الصندوق، حاول مرة أخرى.', ephemeral: true });
+      return;
     }
 
-    if (interaction.commandName === 'achievements') {
-      const items = listAchievements(interaction.guildId, interaction.user.id);
-      const text = items.map(a => `${a.unlocked ? '✅' : '🔒'} **${a.name}** — ${a.description}`).join('\n');
-      return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏅 Achievements').setDescription(text).setColor(0xEB459E)] });
+    await interaction.reply({ content: '🎁 جارٍ فتح **Mystery Box**...' });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    try {
+      await interaction.member.roles.add(role, 'Mystery Box reward');
+    } catch {
+      db.prepare('UPDATE users SET boxes_opened = MAX(0, boxes_opened - 1) WHERE guild_id = ? AND user_id = ?')
+        .run(interaction.guildId, interaction.user.id);
+      await interaction.editReply({ content: '❌ تعذر منح الرتبة. تأكد أن رتبة البوت أعلى من الرتبة المحددة وأنه يملك صلاحية Manage Roles.' });
+      return;
     }
 
-    if (interaction.commandName === 'event-complete') {
-      const target = interaction.options.getUser('user', true);
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: 'لا تملك الصلاحية لاستخدام هذا الأمر.', ephemeral: true });
-      const completed = completeEventQuest(interaction.guildId, target.id);
-      const result = awardCompletion(interaction.guildId, target.id, completed);
-      if (completed.length) await notifyAchievements(target, result.achievements);
-      return interaction.reply({ content: completed.length ? `✅ تم تسجيل مشاركة <@${target.id}> في الفعالية وحصل على **${result.points} نقطة**.` : `✅ تم تسجيل المشاركة لـ <@${target.id}> في مهمة الفعالية.` });
-    }
+    const achievements = evaluateAchievements(interaction.guildId, interaction.user.id);
+    await sendAchievementNotice(interaction.user, interaction.guild, achievements);
+    const dmText = `🎁 **تم فتح Mystery Box بنجاح!**\n\n🎉 حصلت على الرتبة: **${role.name}**\n\n${boxTicketText(interaction.guild, role)}`;
+    await interaction.user.send({ content: dmText }).catch(() => {});
+    await sendLog(interaction.guild, `🎁 <@${interaction.user.id}> فتح Mystery Box وحصل على رتبة **${role.name}**.`);
 
-    if (interaction.commandName === 'mystery-box') {
-      const roles = rewardRoles();
-      if (!roles.length) return interaction.reply({ content: 'لم يتم إعداد رتب الصندوق الغامض بعد. اضبط MYSTERY_BOX_ROLE_IDS في ملف البيئة.', ephemeral: true });
-      const now = Date.now();
-      const old = db.prepare('SELECT last_opened_at FROM mystery_boxes WHERE guild_id = ? AND user_id = ?').get(interaction.guildId, interaction.user.id);
-      const cooldown = Number(process.env.MYSTERY_BOX_COOLDOWN_HOURS || 24) * 3600000;
-      if (old?.last_opened_at && now - old.last_opened_at < cooldown) {
-        const minutes = Math.ceil((cooldown - (now - old.last_opened_at)) / 60000);
-        return interaction.reply({ content: `⏳ يمكنك فتح Mystery Box مرة أخرى بعد **${Math.floor(minutes / 60)} ساعة و${minutes % 60} دقيقة**.`, ephemeral: true });
-      }
-      const role = interaction.guild.roles.cache.get(roles[Math.floor(Math.random() * roles.length)]);
-      if (!role) return interaction.reply({ content: 'إحدى رتب المكافآت المحددة غير موجودة في هذا السيرفر.', ephemeral: true });
-      try { await interaction.member.roles.add(role, 'Mystery Box reward'); }
-      catch { return interaction.reply({ content: 'تعذر منح الرتبة. تأكد أن رتبة البوت أعلى من رتبة المكافأة.', ephemeral: true }); }
-
-      db.prepare('INSERT INTO mystery_boxes (guild_id,user_id,last_opened_at) VALUES (?,?,?) ON CONFLICT(guild_id,user_id) DO UPDATE SET last_opened_at=excluded.last_opened_at').run(interaction.guildId, interaction.user.id, now);
-      db.prepare('UPDATE users SET boxes_opened = boxes_opened + 1 WHERE guild_id = ? AND user_id = ?').run(interaction.guildId, interaction.user.id);
-      const achievements = evaluateAchievements(interaction.guildId, interaction.user.id);
-      await notifyAchievements(interaction.user, achievements);
-
-      const ticketChannel = process.env.TICKET_CHANNEL_ID ? interaction.guild.channels.cache.get(process.env.TICKET_CHANNEL_ID) : null;
-      await interaction.user.send(`🎁 **لقد حصلت على Mystery Box!**\n\n🎉 المكافأة: ${role}\n\n📩 لإتمام استلام المكافأة، افتح تذكرة${ticketChannel ? ` في ${ticketChannel}` : ' في قسم التذاكر في السيرفر'}.`).catch(() => {});
-      return interaction.reply({ content: `🎁 مبروك! حصلت على **${role.name}** من Mystery Box.\n📩 أرسلت لك التعليمات في الخاص.`, ephemeral: true });
-    }
-  } catch (error) {
-    console.error(error);
-    if (!interaction.replied) await interaction.reply({ content: 'حدث خطأ غير متوقع أثناء تنفيذ العملية.', ephemeral: true }).catch(() => {});
+    await interaction.editReply({ content: `🎁 **مبروك!** حصلت على رتبة **${role.name}** من Mystery Box.\n📩 أرسلت لك تعليمات استلام المكافأة في الخاص.` });
+    return;
   }
 });
 
+setInterval(() => {
+  flushAllVoiceSessions().catch(console.error);
+}, numberEnv('VOICE_FLUSH_INTERVAL_SECONDS', 60) * 1000).unref();
+
 process.on('unhandledRejection', console.error);
 process.on('uncaughtException', console.error);
+
+if (!process.env.DISCORD_TOKEN) {
+  console.error('❌ DISCORD_TOKEN is missing.');
+  process.exit(1);
+}
+
 client.login(process.env.DISCORD_TOKEN);
