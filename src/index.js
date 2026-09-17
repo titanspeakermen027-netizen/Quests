@@ -34,27 +34,23 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-const QUEST_INFO_COMMANDS = new Set(['quests', 'quests-top', 'quest-profile', 'quest-streak', 'achievements', 'mystery-box']);
+const QUEST_INFO_COMMANDS = new Set([
+  'quests',
+  'quests-top',
+  'quest-profile',
+  'quest-streak',
+  'achievements',
+  'mystery-box',
+  'quest-event'
+]);
 
 const commands = [
-  new SlashCommandBuilder()
-    .setName('quests')
-    .setDescription('عرض مهامك اليومية وتقدمك.'),
-  new SlashCommandBuilder()
-    .setName('quests-top')
-    .setDescription('عرض ترتيب أكثر الأعضاء إنجازاً للمهام.'),
-  new SlashCommandBuilder()
-    .setName('quest-profile')
-    .setDescription('عرض إحصائياتك في نظام المهام.'),
-  new SlashCommandBuilder()
-    .setName('quest-streak')
-    .setDescription('عرض سلسلة إنجاز المهام الخاصة بك.'),
-  new SlashCommandBuilder()
-    .setName('achievements')
-    .setDescription('عرض إنجازاتك المفتوحة والمقفلة.'),
-  new SlashCommandBuilder()
-    .setName('mystery-box')
-    .setDescription('فتح Mystery Box من الصناديق التي حصلت عليها.'),
+  new SlashCommandBuilder().setName('quests').setDescription('عرض مهامك اليومية وتقدمك.'),
+  new SlashCommandBuilder().setName('quests-top').setDescription('عرض ترتيب أكثر الأعضاء إنجازاً للمهام.'),
+  new SlashCommandBuilder().setName('quest-profile').setDescription('عرض إحصائياتك في نظام المهام.'),
+  new SlashCommandBuilder().setName('quest-streak').setDescription('عرض سلسلة إنجاز المهام الخاصة بك.'),
+  new SlashCommandBuilder().setName('achievements').setDescription('عرض إنجازاتك المفتوحة والمقفلة.'),
+  new SlashCommandBuilder().setName('mystery-box').setDescription('فتح Mystery Box من الصناديق التي حصلت عليها.'),
   new SlashCommandBuilder()
     .setName('quest-event')
     .setDescription('تسجيل مشاركة عضو في فعالية.')
@@ -67,37 +63,35 @@ function numberEnv(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function rewardRoleIds() {
-  return (process.env.MYSTERY_BOX_ROLE_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+function roleRewardEntries(guild, member) {
+  const ids = (process.env.MYSTERY_BOX_ROLE_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+  const rawWeights = (process.env.MYSTERY_BOX_ROLE_WEIGHTS || '').split(',').map(value => Number.parseFloat(value.trim()));
+  return ids.map((id, index) => {
+    const role = guild.roles.cache.get(id);
+    const weight = Number.isFinite(rawWeights[index]) && rawWeights[index] > 0 ? rawWeights[index] : 1;
+    return { role, weight };
+  }).filter(entry => entry.role && entry.role.editable && !member.roles.cache.has(entry.role.id));
 }
 
-function rewardWeights(length) {
-  const raw = (process.env.MYSTERY_BOX_ROLE_WEIGHTS || '').split(',').map(value => Number.parseFloat(value.trim()));
-  if (raw.length !== length || raw.some(weight => !Number.isFinite(weight) || weight <= 0)) return Array(length).fill(1);
-  return raw;
-}
-
-function weightedRandom(items, weights) {
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
+function weightedRandom(entries) {
+  const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
   let cursor = Math.random() * total;
-  for (let index = 0; index < items.length; index += 1) {
-    cursor -= weights[index];
-    if (cursor < 0) return items[index];
+  for (const entry of entries) {
+    cursor -= entry.weight;
+    if (cursor < 0) return entry.role;
   }
-  return items[items.length - 1];
+  return entries[entries.length - 1].role;
 }
 
-function progressBar(progress, target, size = 10) {
-  const ratio = target > 0 ? Math.min(progress / target, 1) : 0;
+function chooseMysteryRole(guild, member) {
+  const entries = roleRewardEntries(guild, member);
+  return entries.length ? weightedRandom(entries) : null;
+}
+
+function progressBar(progressValue, target, size = 10) {
+  const ratio = target > 0 ? Math.min(progressValue / target, 1) : 0;
   const filled = Math.round(ratio * size);
-  return `${'█'.repeat(filled)}${'░'.repeat(size - filled)} ${Math.min(progress, target)}/${target}`;
-}
-
-function humanTime(ms) {
-  const totalMinutes = Math.max(1, Math.ceil(ms / 60000));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return hours ? `${hours} ساعة و${minutes} دقيقة` : `${minutes} دقيقة`;
+  return `${'█'.repeat(filled)}${'░'.repeat(size - filled)} ${Math.min(progressValue, target)}/${target}`;
 }
 
 async function sendLog(guild, content) {
@@ -121,7 +115,7 @@ async function processCompletion({ guild, user, completed, replyChannel, publicN
   const questNames = completed.map(quest => `**${quest.title}**`).join('، ');
 
   const summary = [
-    `🎉 **تم إكمال مهمة!**`,
+    '🎉 **تم إكمال مهمة!**',
     `✅ ${questNames}`,
     `⭐ حصلت على **${result.points} نقطة**.`,
     `🔥 سلسلة المهام: **${result.streak} يوم**.`
@@ -129,17 +123,12 @@ async function processCompletion({ guild, user, completed, replyChannel, publicN
   if (result.boxAwarded) summary.push('🎁 أكملت جميع مهام اليوم وحصلت على **Mystery Box** جديد! استخدم `/mystery-box` لفتحه.');
 
   if (publicNotice && replyChannel?.isTextBased()) {
-    await replyChannel.send({
-      content: summary.join('\n'),
-      allowedMentions: { users: [user.id], repliedUser: false }
-    }).catch(() => {});
+    await replyChannel.send({ content: summary.join('\n'), allowedMentions: { users: [user.id], repliedUser: false } }).catch(() => {});
   } else {
     await user.send({ content: summary.join('\n') }).catch(() => {});
   }
 
-  if (result.boxAwarded) {
-    await sendLog(guild, `🎁 <@${user.id}> حصل على Mystery Box بعد إكمال جميع مهام اليوم.`);
-  }
+  if (result.boxAwarded) await sendLog(guild, `🎁 <@${user.id}> حصل على Mystery Box بعد إكمال جميع مهام اليوم.`);
   await sendAchievementNotice(user, guild, result.achievements);
   return result;
 }
@@ -152,14 +141,15 @@ function startVoiceSession(guildId, userId) {
 }
 
 async function flushVoiceSession(guild, userId, remove = false) {
-  const row = db.prepare('SELECT started_at, last_flushed_at FROM voice_sessions WHERE guild_id = ? AND user_id = ?')
-    .get(guild.id, userId);
+  const row = db.prepare('SELECT started_at, last_flushed_at FROM voice_sessions WHERE guild_id = ? AND user_id = ?').get(guild.id, userId);
   if (!row) return;
   const now = Date.now();
-  const minutes = Math.floor((now - row.last_flushed_at) / 60000);
+  const elapsed = now - row.last_flushed_at;
+  const minutes = Math.floor(elapsed / 60000);
   if (minutes > 0) {
     const completed = progress(guild.id, userId, 'voice_minutes', minutes);
-    db.prepare('UPDATE voice_sessions SET last_flushed_at = ? WHERE guild_id = ? AND user_id = ?').run(now - ((now - row.last_flushed_at) % 60000), guild.id, userId);
+    db.prepare('UPDATE voice_sessions SET last_flushed_at = ? WHERE guild_id = ? AND user_id = ?')
+      .run(now - (elapsed % 60000), guild.id, userId);
     if (completed.length) {
       const member = guild.members.cache.get(userId);
       if (member) await processCompletion({ guild, user: member.user, completed, publicNotice: false });
@@ -169,26 +159,19 @@ async function flushVoiceSession(guild, userId, remove = false) {
 }
 
 async function flushAllVoiceSessions() {
-  for (const [guildId, userId] of db.prepare('SELECT guild_id, user_id FROM voice_sessions').all().map(row => [row.guild_id, row.user_id])) {
-    const guild = client.guilds.cache.get(guildId);
-    if (guild) await flushVoiceSession(guild, userId, false);
+  const rows = db.prepare('SELECT guild_id, user_id FROM voice_sessions').all();
+  for (const row of rows) {
+    const guild = client.guilds.cache.get(row.guild_id);
+    if (guild) await flushVoiceSession(guild, row.user_id, false);
   }
 }
 
-function chooseMysteryRole(guild, member) {
-  const configuredIds = rewardRoleIds();
-  const configured = configuredIds
-    .map(id => guild.roles.cache.get(id))
-    .filter(role => role && role.editable && !member.roles.cache.has(role.id));
-  if (!configured.length) return null;
-  return weightedRandom(configured, rewardWeights(configured.length));
-}
-
-function boxTicketText(guild, role) {
+function boxTicketText(guild) {
   const channelId = process.env.TICKET_CHANNEL_ID;
   const channel = channelId ? guild.channels.cache.get(channelId) : null;
-  const ticketHint = channel ? ` داخل ${channel}` : ' داخل السيرفر';
-  return `📩 لاستلام المكافأة وإتمام الإجراءات، يرجى فتح تذكرة${ticketHint}.\n🎁 المكافأة: **${role.name}**`;
+  return channel
+    ? `📩 يرجى فتح تذكرة لاستلام المكافأة داخل ${channel}.`
+    : '📩 يرجى فتح تذكرة داخل السيرفر لاستلام المكافأة.';
 }
 
 client.once('ready', async () => {
@@ -211,14 +194,14 @@ client.on('messageCreate', async message => {
     ...progress(message.guild.id, message.author.id, 'messages', 1),
     ...progress(message.guild.id, message.author.id, 'unique_channels', 1, { channelId: message.channelId })
   ];
-  if (completed.length) await processCompletion({ guild: message.guild, user: message.author, completed, replyChannel: message.channel, publicNotice: true });
+  if (completed.length) {
+    await processCompletion({ guild: message.guild, user: message.author, completed, replyChannel: message.channel, publicNotice: true });
+  }
 });
 
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot || !reaction.message.guild) return;
-  if (reaction.message.partial) {
-    await reaction.message.fetch().catch(() => {});
-  }
+  if (reaction.message.partial) await reaction.message.fetch().catch(() => {});
   const guild = reaction.message.guild;
   const completed = progress(guild.id, user.id, 'reactions', 1);
   if (completed.length) await processCompletion({ guild, user, completed, publicNotice: false });
@@ -228,6 +211,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const member = newState.member || oldState.member;
   if (!member || member.user.bot) return;
   const guild = newState.guild;
+
   if (!oldState.channelId && newState.channelId) {
     startVoiceSession(guild.id, member.id);
     return;
@@ -237,9 +221,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     startVoiceSession(guild.id, member.id);
     return;
   }
-  if (oldState.channelId && !newState.channelId) {
-    await flushVoiceSession(guild, member.id, true);
-  }
+  if (oldState.channelId && !newState.channelId) await flushVoiceSession(guild, member.id, true);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -277,9 +259,7 @@ client.on('interactionCreate', async interaction => {
     const lines = rows.length
       ? rows.map((row, index) => `**${index + 1}.** <@${row.user_id}> — ⭐ **${row.total_points}** نقطة · ✅ ${row.total_completed} مهمة · 🔥 ${row.streak} يوم`).join('\n')
       : 'لا توجد بيانات بعد.';
-    await interaction.reply({ embeds: [
-      new EmbedBuilder().setTitle('🏆 ترتيب المهام').setDescription(lines).setColor(0xF1C40F)
-    ] });
+    await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏆 ترتيب المهام').setDescription(lines).setColor(0xF1C40F)] });
     return;
   }
 
@@ -359,8 +339,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const consumed = consumeMysteryBox(interaction.guildId, interaction.user.id);
-    if (!consumed) {
+    if (!consumeMysteryBox(interaction.guildId, interaction.user.id)) {
       await interaction.reply({ content: 'تعذر حجز الصندوق، حاول مرة أخرى.', ephemeral: true });
       return;
     }
@@ -371,20 +350,16 @@ client.on('interactionCreate', async interaction => {
     try {
       await interaction.member.roles.add(role, 'Mystery Box reward');
     } catch {
-      db.prepare('UPDATE users SET boxes_opened = MAX(0, boxes_opened - 1) WHERE guild_id = ? AND user_id = ?')
-        .run(interaction.guildId, interaction.user.id);
+      db.prepare('UPDATE users SET boxes_opened = MAX(0, boxes_opened - 1) WHERE guild_id = ? AND user_id = ?').run(interaction.guildId, interaction.user.id);
       await interaction.editReply({ content: '❌ تعذر منح الرتبة. تأكد أن رتبة البوت أعلى من الرتبة المحددة وأنه يملك صلاحية Manage Roles.' });
       return;
     }
 
     const achievements = evaluateAchievements(interaction.guildId, interaction.user.id);
     await sendAchievementNotice(interaction.user, interaction.guild, achievements);
-    const dmText = `🎁 **تم فتح Mystery Box بنجاح!**\n\n🎉 حصلت على الرتبة: **${role.name}**\n\n${boxTicketText(interaction.guild, role)}`;
-    await interaction.user.send({ content: dmText }).catch(() => {});
+    await interaction.user.send({ content: `🎁 **تم فتح Mystery Box بنجاح!**\n\n🎉 حصلت على الرتبة: **${role.name}**\n\n${boxTicketText(interaction.guild)}` }).catch(() => {});
     await sendLog(interaction.guild, `🎁 <@${interaction.user.id}> فتح Mystery Box وحصل على رتبة **${role.name}**.`);
-
     await interaction.editReply({ content: `🎁 **مبروك!** حصلت على رتبة **${role.name}** من Mystery Box.\n📩 أرسلت لك تعليمات استلام المكافأة في الخاص.` });
-    return;
   }
 });
 
