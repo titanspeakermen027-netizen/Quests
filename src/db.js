@@ -65,11 +65,12 @@ CREATE TABLE IF NOT EXISTS mystery_boxes (
   PRIMARY KEY (guild_id, user_id)
 );
 
-CREATE TABLE IF NOT EXISTS settings (
+CREATE TABLE IF NOT EXISTS daily_rewards (
   guild_id TEXT NOT NULL,
-  key TEXT NOT NULL,
-  value TEXT NOT NULL,
-  PRIMARY KEY (guild_id, key)
+  user_id TEXT NOT NULL,
+  quest_date TEXT NOT NULL,
+  box_awarded INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (guild_id, user_id, quest_date)
 );
 
 CREATE TABLE IF NOT EXISTS activity_guard (
@@ -80,6 +81,14 @@ CREATE TABLE IF NOT EXISTS activity_guard (
   PRIMARY KEY (guild_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS daily_channel_hits (
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  quest_date TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  PRIMARY KEY (guild_id, user_id, quest_date, channel_id)
+);
+
 CREATE TABLE IF NOT EXISTS voice_sessions (
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
@@ -87,13 +96,18 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
   last_flushed_at INTEGER NOT NULL,
   PRIMARY KEY (guild_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  guild_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (guild_id, key)
+);
 `);
 
 function addColumnIfMissing(table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!columns.some(row => row.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
+  if (!columns.some(row => row.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 addColumnIfMissing('users', 'boxes_earned', 'INTEGER NOT NULL DEFAULT 0');
@@ -110,7 +124,7 @@ function getSetting(guildId, key, fallback = null) {
 
 function setSetting(guildId, key, value) {
   db.prepare(`INSERT INTO settings (guild_id, key, value) VALUES (?, ?, ?)
-    ON CONFLICT(guild_id, key) DO UPDATE SET value = excluded.value`).run(guildId, key, String(value));
+    ON CONFLICT(guild_id, key) DO UPDATE SET value = excluded.value`).run(guildId, String(key), String(value));
 }
 
 module.exports = { db, ensureUser, getSetting, setSetting };
