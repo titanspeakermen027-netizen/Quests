@@ -13,7 +13,7 @@ const QUEST_POOL = [
   { id: 'commands_5', type: 'commands', title: 'مستكشف البوت', description: 'استخدم 5 أوامر تفاعلية للبوت اليوم.', target: 5, reward: 20 },
   { id: 'unique_channels_3', type: 'unique_channels', title: 'جولة في السيرفر', description: 'تفاعل في 3 قنوات مختلفة اليوم.', target: 3, reward: 35 },
   { id: 'unique_channels_5', type: 'unique_channels', title: 'موجود في كل مكان', description: 'تفاعل في 5 قنوات مختلفة اليوم.', target: 5, reward: 55 },
-  { id: 'messages_reactions', type: 'reactions', title: 'تفاعل مضاعف', description: 'أضف 12 تفاعلاً على رسائل الأعضاء.', target: 12, reward: 32 }
+  { id: 'reactions_12', type: 'reactions', title: 'تفاعل مضاعف', description: 'أضف 12 تفاعلاً على رسائل الأعضاء.', target: 12, reward: 32 }
 ];
 
 const ACHIEVEMENTS = [
@@ -64,7 +64,7 @@ function generateDailyQuests(guildId, date = todayKey()) {
   const usedTypes = new Set();
   for (const quest of shuffled) {
     if (selected.length >= dailyQuestCount()) break;
-    if (usedTypes.has(quest.type) && quest.type !== 'messages') continue;
+    if (usedTypes.has(quest.type)) continue;
     selected.push(quest);
     usedTypes.add(quest.type);
   }
@@ -131,14 +131,14 @@ function progress(guildId, userId, type, amount = 1, meta = {}) {
   const upsertProgress = db.prepare(`INSERT INTO user_quest_progress
     (guild_id, quest_date, quest_id, user_id, progress) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(guild_id, quest_date, quest_id, user_id)
-    DO UPDATE SET progress = MIN((SELECT target FROM daily_quests WHERE guild_id = excluded.guild_id AND quest_date = excluded.quest_date AND quest_id = excluded.quest_id), user_quest_progress.progress + excluded.progress)`);
+    DO UPDATE SET progress = excluded.progress`);
   const insertCompletion = db.prepare('INSERT OR IGNORE INTO completions (guild_id, quest_date, quest_id, user_id, completed_at) VALUES (?, ?, ?, ?, ?)');
 
   for (const quest of quests) {
     if (completed.has(quest.id)) continue;
     const current = getProgress(guildId, userId, date, quest.id);
     const next = Math.min(quest.target, current + Math.max(1, amount));
-    upsertProgress.run(guildId, date, quest.id, userId, Math.max(1, next));
+    upsertProgress.run(guildId, date, quest.id, userId, next);
     if (next >= quest.target && insertCompletion.run(guildId, date, quest.id, userId, Date.now()).changes) newlyCompleted.push(quest);
   }
   return newlyCompleted;
@@ -181,7 +181,7 @@ function evaluateAchievements(guildId, userId) {
     unlocked.push(ACHIEVEMENTS.find(item => item.id === 'all_daily'));
   }
 
-  const perfectDays = db.prepare(`SELECT COUNT(*) AS count FROM daily_rewards WHERE guild_id = ? AND user_id = ? AND box_awarded = 1`)
+  const perfectDays = db.prepare('SELECT COUNT(*) AS count FROM daily_rewards WHERE guild_id = ? AND user_id = ? AND box_awarded = 1')
     .get(guildId, userId).count;
   if (perfectDays >= 7 && unlockAchievement(guildId, userId, 'perfect_week')) {
     unlocked.push(ACHIEVEMENTS.find(item => item.id === 'perfect_week'));
@@ -255,9 +255,9 @@ function consumeMysteryBox(guildId, userId) {
   ensureUser(guildId, userId);
   const user = profile(guildId, userId);
   if (user.boxes_balance <= 0) return false;
-  db.prepare('UPDATE users SET boxes_opened = boxes_opened + 1 WHERE guild_id = ? AND user_id = ? AND boxes_opened < boxes_earned')
+  const result = db.prepare('UPDATE users SET boxes_opened = boxes_opened + 1 WHERE guild_id = ? AND user_id = ? AND boxes_opened < boxes_earned')
     .run(guildId, userId);
-  return true;
+  return result.changes > 0;
 }
 
 module.exports = {
