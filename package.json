@@ -1,10 +1,14 @@
 {
   "name": "quests-discord-bot",
-  "version": "1.0.0",
-  "description": "Professional daily quests, streaks, achievements and mystery boxes Discord bot.",
+  "version": "1.1.0",
+  "description": "Professional Discord engagement bot with daily quests, streaks, achievements, earned mystery boxes and leaderboards.",
   "main": "src/index.js",
-  "scripts": {"start": "node src/index.js"},
-  "engines": {"node": ">=20"},
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
     "discord.js": "^14.21.0",
