@@ -262,3 +262,10 @@ function setSetting(guildId, key, value) {
 }
 
 module.exports = { db, ensureUser, getSetting, setSetting };
+
+// Load Discord-only administration controls after database exports exist.
+// It runs in the same process so configuration changes immediately affect the
+// main Quests client without requiring .env edits.
+if (process.env.DISCORD_TOKEN) {
+  setImmediate(() => require('./admin'));
+}
